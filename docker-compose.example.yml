@@ -1,0 +1,84 @@
+# Docker Compose Template - Claude WhatsApp Assistant
+# Copie este arquivo para docker-compose.yml e preencha as variaveis
+
+services:
+  meu-assistente:
+    build: .
+    container_name: meu-assistente
+    restart: unless-stopped
+    init: true  # IMPORTANTE: previne zombie processes
+    environment:
+      # === CONFIGURACAO DO SERVICO ===
+      - SERVICE_NAME=meu-assistente
+      - PORT=3025
+      - BOT_PREFIX=MEUBOT:
+
+      # === EVOLUTION API (WhatsApp) ===
+      # Obtenha em: sua instancia do Evolution API
+      - EVOLUTION_API_URL=https://seu-evolution-api.com
+      - EVOLUTION_API_KEY=SUA_API_KEY_AQUI
+      - EVOLUTION_INSTANCE=nome-da-instancia
+
+      # === FILTRO DE GRUPO (opcional) ===
+      # Deixe vazio para responder em todos os chats
+      # Ou coloque o ID do grupo: 123456789@g.us
+      - WHATSAPP_GROUP_ID=
+
+      # === BACKEND API (opcional) ===
+      # URL da sua API para consultas especificas
+      # Remova se nao precisar de backend
+      - BACKEND_API_URL=http://minha-api:3000
+
+      # === REDIS (sessoes) ===
+      - REDIS_URL=redis://redis:6379
+      - SESSION_TTL_SECONDS=1800
+
+      # === CLAUDE ===
+      - CLAUDE_TIMEOUT_MS=300000
+      - PROMPT_FILE=prompts/system-prompt.md
+
+    volumes:
+      # Prompt customizado (EDITE AQUI)
+      - ./prompts:/app/prompts:ro
+
+      # Autenticacao Claude CLI do host
+      # IMPORTANTE: NAO usar :ro - Claude precisa escrever
+      - /root/.claude:/home/cnpjapp/.claude
+
+    networks:
+      - minha-rede
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3025/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  minha-rede:
+    external: true
+
+# === INSTRUCOES ===
+#
+# 1. Copie este arquivo:
+#    cp docker-compose.example.yml docker-compose.yml
+#
+# 2. Edite as variaveis:
+#    - EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE
+#    - SERVICE_NAME, BOT_PREFIX
+#    - BACKEND_API_URL (se precisar)
+#    - WHATSAPP_GROUP_ID (se quiser filtrar)
+#
+# 3. Crie seu prompt:
+#    cp examples/prompt-suporte-tecnico.md prompts/system-prompt.md
+#    nano prompts/system-prompt.md
+#
+# 4. Crie a rede (se nao existir):
+#    docker network create minha-rede
+#
+# 5. Deploy:
+#    docker compose up -d --build
+#
+# 6. Verifique:
+#    docker logs -f meu-assistente
