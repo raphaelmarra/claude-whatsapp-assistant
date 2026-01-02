@@ -1,5 +1,5 @@
 // ============================================================================
-// CNPJ ASSISTANT v4.0.0 - Redis Session + Claude CLI --resume
+// CNPJ ASSISTANT v4.2.0 - Redis Session + Claude CLI --resume + Auto CSV Detection
 // ============================================================================
 
 const express = require("express");
@@ -14,7 +14,7 @@ app.use(express.json({ limit: "10mb" }));
 const config = {
   port: process.env.PORT || 3025,
   serviceName: process.env.SERVICE_NAME || "cnpj-assistant",
-  version: "4.0.0",
+  version: "4.2.0",
   evolutionUrl: process.env.EVOLUTION_API_URL || "https://evolutionapi2.sdebot.top",
   evolutionKey: process.env.EVOLUTION_API_KEY || "",
   evolutionInstance: process.env.EVOLUTION_INSTANCE || "R",
@@ -140,6 +140,53 @@ async function sendToClaude(groupId, message) {
   });
 }
 
+// Enviar documento via Evolution API
+async function sendWhatsAppDocument(to, content, filename, caption) {
+  try {
+    const base64Content = Buffer.from(content, "utf-8").toString("base64");
+    const mimetype = filename.endsWith(".csv") ? "text/csv" : "application/octet-stream";
+
+    const r = await fetch(config.evolutionUrl + "/message/sendMedia/" + config.evolutionInstance, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: config.evolutionKey },
+      body: JSON.stringify({
+        number: to,
+        mediatype: "document",
+        mimetype: mimetype,
+        caption: caption || "",
+        media: base64Content,
+        fileName: filename
+      })
+    });
+    console.log("[Evolution] Documento enviado: " + filename);
+    return r.json();
+  } catch (err) {
+    console.error("[Evolution] Erro documento: " + err.message);
+    throw err;
+  }
+}
+
+// Detectar blocos CSV na resposta: [CSV:arquivo.csv]conteudo[/CSV]
+function parseResponseForDocuments(response) {
+  const csvRegex = /\[CSV:([^\]]+)\]\n([\s\S]*?)\n\[\/CSV\]/g;
+  const documents = [];
+  let textResponse = response;
+
+  let match;
+  while ((match = csvRegex.exec(response)) !== null) {
+    documents.push({
+      filename: match[1],
+      content: match[2].trim()
+    });
+    textResponse = textResponse.replace(match[0], "");
+  }
+
+  return {
+    text: textResponse.trim(),
+    documents: documents
+  };
+}
+
 async function sendWhatsApp(to, text) {
   const MAX = 60000;
   if (text.length <= MAX) return sendWhatsAppSingle(to, text);
@@ -172,6 +219,69 @@ async function sendWhatsAppSingle(to, text) {
   } catch (err) {
     console.error("[Evolution] Erro: " + err.message);
     throw err;
+  }
+}
+
+// Buscar arquivos CSV criados pelo Claude em /app
+async function findAndSendCSVFiles(to) {
+  const appDir = "/app";
+  let csvFiles = [];
+
+  try {
+    const files = fs.readdirSync(appDir);
+    csvFiles = files.filter(f => f.endsWith(".csv"));
+  } catch (e) {
+    return [];
+  }
+
+  const sent = [];
+  for (const csvFile of csvFiles) {
+    const filePath = path.join(appDir, csvFile);
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      console.log("[CSV] Encontrado arquivo: " + csvFile + " (" + content.length + " bytes)");
+      await sendWhatsAppDocument(to, content, csvFile, "Dados exportados");
+      fs.unlinkSync(filePath); // Remove após enviar
+      console.log("[CSV] Arquivo enviado e removido: " + csvFile);
+      sent.push(csvFile);
+      await new Promise(r => setTimeout(r, 500));
+    } catch (e) {
+      console.error("[CSV] Erro ao processar " + csvFile + ": " + e.message);
+    }
+  }
+  return sent;
+}
+
+// Enviar resposta com suporte a documentos
+async function sendResponse(to, response) {
+  // 1. Verificar arquivos CSV criados pelo Claude
+  const csvFilesSent = await findAndSendCSVFiles(to);
+
+  // 2. Verificar formato especial [CSV:arquivo.csv]...[/CSV]
+  const parsed = parseResponseForDocuments(response);
+
+  // Enviar documentos do formato especial
+  for (const doc of parsed.documents) {
+    console.log("[Response] Enviando documento inline: " + doc.filename);
+    await sendWhatsAppDocument(to, doc.content, doc.filename, "Arquivo exportado");
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // Limpar menções a arquivos locais na resposta
+  let cleanResponse = parsed.text;
+  if (csvFilesSent.length > 0) {
+    // Remove menções a paths de arquivos salvos
+    cleanResponse = cleanResponse.replace(/`\/app\/[^`]+\.csv`/g, "");
+    cleanResponse = cleanResponse.replace(/CSV gerado com sucesso:[^\n]+/g, "");
+    cleanResponse = cleanResponse.trim();
+  }
+
+  // Enviar texto restante
+  const totalDocs = csvFilesSent.length + parsed.documents.length;
+  if (cleanResponse && cleanResponse.length > 0) {
+    await sendWhatsApp(to, cleanResponse);
+  } else if (totalDocs > 0) {
+    await sendWhatsApp(to, config.botPrefix + " Arquivo(s) enviado(s)!");
   }
 }
 
@@ -227,7 +337,7 @@ app.post("/webhook", async (req, res) => {
   (async () => {
     try {
       const r = await sendToClaude(msg.from, msg.text);
-      await sendWhatsApp(msg.from, r.text);
+      await sendResponse(msg.from, r.text);
       console.log("[Webhook] Processado em " + (Date.now() - start) + "ms");
     } catch (e) {
       console.error("[Webhook] Erro: " + e.message);
@@ -243,7 +353,7 @@ app.get("/health", async (req, res) => {
     status: "ok",
     service: config.serviceName,
     version: config.version,
-    architecture: "Claude --resume + Redis",
+    architecture: "Claude --resume + Redis + Documents",
     redis: rok ? "connected" : "disconnected",
     uptime: process.uptime(),
     sessionTtl: config.sessionTtl
@@ -264,7 +374,7 @@ app.get("/", (req, res) => {
   res.json({
     name: config.serviceName,
     version: config.version,
-    description: "CNPJ Assistant com memoria via Claude --resume + Redis",
+    description: "CNPJ Assistant com memoria via Claude --resume + Redis + CSV Documents",
     commands: ["/reset - limpa contexto", "/sessao - info da sessao"]
   });
 });
@@ -276,7 +386,7 @@ app.get("/", (req, res) => {
   app.listen(config.port, () => {
     console.log("============================================");
     console.log("  CNPJ-ASSISTANT v" + config.version);
-    console.log("  Claude --resume + Redis Sessions");
+    console.log("  Claude --resume + Redis + Documents");
     console.log("============================================");
     console.log("  Porta: " + config.port);
     console.log("  Grupo: " + (config.groupId || "(todos)"));
