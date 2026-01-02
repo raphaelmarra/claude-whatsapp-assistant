@@ -1,137 +1,126 @@
-# WhatsApp Assistant - Arquitetura Modular
+# Claude WhatsApp Assistant v4.0.0
 
-Bot WhatsApp generico com Claude Code. Configuravel via ENV e prompt externo.
+Bot WhatsApp com **memoria de contexto** usando Claude CLI + Redis.
+
+## Arquitetura
+
+```
+Usuario → WhatsApp → Evolution API → Webhook
+                                        ↓
+                              Redis (session_id)
+                                        ↓
+                    ┌─────────────────────────────────────┐
+                    │ session_id existe?                  │
+                    │   SIM → claude --resume <sid> -p    │
+                    │   NAO → claude -p (prompt completo) │
+                    └─────────────────────────────────────┘
+                                        ↓
+                              CNPJ-CLI (consultas)
+                                        ↓
+                              Resposta → WhatsApp
+```
 
 ## Estrutura
 
 ```
-whatsapp-assistant/
-  index.js              # Logica pura (nao editar para mudar comportamento)
-  prompts/
-    system-prompt.md    # Prompt do Claude (EDITAR AQUI)
-  CLAUDE.md             # Este arquivo
-  Dockerfile
-  docker-compose.yml
+claude-whatsapp-assistant/
+├── index.js              # Logica principal (v4.0.0)
+├── package.json          # express + ioredis
+├── Dockerfile            # Node 20 + Claude CLI
+├── docker-compose.yml    # Config + Redis + Volume .claude
+├── prompts/
+│   └── system-prompt.md  # Prompt do Claude (EDITAR AQUI)
+├── CLAUDE.md             # Este arquivo (para IA)
+├── AI-CONTEXT.md         # Contexto tecnico para IA
+└── README.md             # Documentacao geral
 ```
 
-## Para Modificar Comportamento
+## Como Funciona a Memoria
 
-**Editar `prompts/system-prompt.md`** - NAO editar index.js
+1. **Primeira msg:** `claude -p "prompt+msg" --output-format json`
+2. **Captura:** `session_id` do JSON response
+3. **Redis:** `SETEX cnpj:session:{groupId} 1800 {session_id}`
+4. **Proximas msgs:** `claude --resume <session_id> -p "msg"`
+5. **Resultado:** Claude lembra contexto anterior!
 
-```bash
-# Editar prompt
-nano prompts/system-prompt.md
+## Comandos WhatsApp
 
-# Recarregar sem restart (dev)
-curl -X POST http://localhost:3025/reload-prompt
-
-# Ou restart container (producao)
-docker compose restart
-```
-
-## Para Replicar em Outro Dominio
-
-1. Copiar pasta inteira
-2. Editar `prompts/system-prompt.md` com novo dominio
-3. Ajustar `docker-compose.yml` com novas ENVs
-4. Deploy
-
-**Exemplo: Bot de Saude**
-```bash
-cp -r cnpj-assistant/ saude-assistant/
-cd saude-assistant/
-# Editar prompts/system-prompt.md com endpoints de saude
-# Ajustar docker-compose.yml
-docker compose up -d
-```
+| Comando | Funcao |
+|---------|--------|
+| `/reset` | Limpa sessao e contexto |
+| `/sessao` | Mostra info da sessao ativa |
 
 ## Variaveis de Ambiente
 
-| Variavel | Obrigatoria | Default | Descricao |
-|----------|-------------|---------|-----------|
-| SERVICE_NAME | Nao | whatsapp-assistant | Nome do servico |
-| PORT | Nao | 3025 | Porta HTTP |
-| EVOLUTION_API_URL | Sim | - | URL Evolution API |
-| EVOLUTION_API_KEY | Sim | - | API key Evolution |
-| EVOLUTION_INSTANCE | Nao | R | Instancia WhatsApp |
-| WHATSAPP_GROUP_ID | Nao | (todos) | Filtrar por grupo |
-| BOT_PREFIX | Nao | ASSISTANT: | Prefixo das respostas |
-| BACKEND_API_URL | Nao | http://localhost:3015 | URL do backend |
-| CLAUDE_TIMEOUT_MS | Nao | 300000 | Timeout Claude (5min) |
-| PROMPT_FILE | Nao | prompts/system-prompt.md | Arquivo do prompt |
+| Variavel | Default | Descricao |
+|----------|---------|-----------|
+| REDIS_URL | redis://redis:6379 | Conexao Redis |
+| SESSION_TTL_SECONDS | 1800 | TTL sessao (30min) |
+| BOT_PREFIX | CLAUDE: | Prefixo respostas |
+| BACKEND_API_URL | http://cnpj-cli:3015 | API de consultas |
+| WHATSAPP_GROUP_ID | - | Filtrar por grupo |
+| CLAUDE_TIMEOUT_MS | 300000 | Timeout (5min) |
 
-## Placeholders no Prompt
+## ATENCAO: Volume .claude
 
-O prompt suporta placeholders que sao substituidos em runtime:
+```yaml
+# CERTO - permite escrita
+volumes:
+  - /root/.claude:/home/cnpjapp/.claude
 
-| Placeholder | Substituido por |
-|-------------|-----------------|
-| `{{CNPJ_CLI_URL}}` | BACKEND_API_URL |
-| `{{BACKEND_API_URL}}` | BACKEND_API_URL |
-| `{{BOT_PREFIX}}` | BOT_PREFIX |
-| `{{SERVICE_NAME}}` | SERVICE_NAME |
+# ERRADO - causa erro!
+volumes:
+  - /root/.claude:/home/cnpjapp/.claude:ro  # NAO USAR :ro
+```
 
-## Endpoints do Servico
+Claude CLI precisa ESCREVER arquivos de sessao.
+
+## Para Modificar Comportamento
+
+```bash
+# Editar prompt (NAO editar index.js)
+nano prompts/system-prompt.md
+
+# Recarregar sem restart
+curl -X POST http://localhost:3025/reload-prompt
+
+# Ou restart
+docker compose restart
+```
+
+## Para Adicionar Features
+
+1. **Nova consulta:** Editar `prompts/system-prompt.md` com novos endpoints
+2. **Novo comando:** Editar `index.js` no bloco de comandos especiais
+3. **Mudar TTL:** Ajustar `SESSION_TTL_SECONDS` no docker-compose
+
+## Endpoints HTTP
 
 | Metodo | Path | Descricao |
 |--------|------|-----------|
-| POST | /webhook | Recebe mensagens Evolution |
-| GET | /health | Status e config |
-| POST | /reload-prompt | Recarrega prompt (dev) |
-| GET | / | Info da API |
+| POST | /webhook | Recebe msgs Evolution |
+| GET | /health | Status + Redis |
+| POST | /reload-prompt | Recarrega prompt |
+| POST | /clear-session/:gid | Limpa sessao |
 
 ## Deploy
 
 ```bash
-# Build e start
-docker compose up -d --build
-
-# Logs
-docker logs [container] -f --since 5m
-
-# Health
-curl -s http://localhost:3025/health | jq
+cd /root/cnpj-assistant
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+docker logs -f cnpj-assistant
 ```
 
 ## Troubleshooting
 
 | Problema | Causa | Solucao |
 |----------|-------|---------|
-| Prompt vazio | Arquivo nao encontrado | Verificar PROMPT_FILE |
-| Sem resposta | Claude timeout | Reduzir complexidade do prompt |
-| Grupo errado | WHATSAPP_GROUP_ID | Verificar ID do grupo |
-| Loop infinito | BOT_PREFIX incorreto | Verificar prefixo |
-
-## Desenvolvimento Agil
-
-```bash
-# 1. Editar prompt localmente
-nano prompts/system-prompt.md
-
-# 2. Testar sem rebuild
-curl -X POST http://localhost:3025/reload-prompt
-
-# 3. Testar via webhook simulado
-curl -X POST http://localhost:3025/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"event":"messages.upsert","data":{"key":{"remoteJid":"test"},"message":{"conversation":"teste"}}}'
-
-# 4. Se OK, commit
-git add prompts/
-git commit -m "feat: atualizar prompt"
-```
-
-## Anti-Patterns
-
-**NAO FAZER:**
-- Editar index.js para mudar comportamento do bot
-- Hardcodar endpoints no codigo
-- Colocar credenciais no codigo
-
-**FAZER:**
-- Editar prompts/system-prompt.md
-- Usar ENV para configuracao
-- Manter index.js generico
+| Erro permissao | Volume :ro | Remover :ro do volume |
+| Sem contexto | Redis desconectado | Verificar REDIS_URL |
+| Timeout | Consulta pesada | Aumentar CLAUDE_TIMEOUT_MS |
+| Loop | Prefixo errado | Verificar BOT_PREFIX |
 
 ---
-**Versao:** 3.0.0 | **Arquitetura:** Modular | **Prompt:** Externo
+**v4.0.0** | Redis Sessions | Claude --resume
