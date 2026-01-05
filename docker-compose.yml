@@ -14,7 +14,7 @@ services:
       WHATSAPP_GROUP_ID: 120363423903208895@g.us
       BOT_PREFIX: "CLAUDE:"
       BACKEND_API_URL: http://cnpj-cli:3015
-      CLAUDE_TIMEOUT_MS: "300000"
+      CLAUDE_TIMEOUT_MS: "180000"
       REDIS_URL: redis://redis:6379
       SESSION_TTL_SECONDS: "1800"
       PROMPT_FILE: prompts/system-prompt.md

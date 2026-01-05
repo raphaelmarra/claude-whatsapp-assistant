@@ -21,7 +21,7 @@ const config = {
   groupId: process.env.WHATSAPP_GROUP_ID || "",
   botPrefix: process.env.BOT_PREFIX || "CLAUDE:",
   backendUrl: process.env.BACKEND_API_URL || "http://cnpj-cli:3015",
-  claudeTimeout: parseInt(process.env.CLAUDE_TIMEOUT_MS) || 300000,
+  claudeTimeout: parseInt(process.env.CLAUDE_TIMEOUT_MS) || 180000,
   redisUrl: process.env.REDIS_URL || "redis://redis:6379",
   sessionTtl: parseInt(process.env.SESSION_TTL_SECONDS) || 1800,
   promptFile: process.env.PROMPT_FILE || "prompts/system-prompt.md",
@@ -48,6 +48,41 @@ async function acquireLock(groupId, timeoutMs = 310000) {
 function releaseLock(groupId) {
   sessionLocks.delete(groupId);
 }
+// ============================================================================
+// TIER 2: Rate Limiting por grupo (5 req/min)
+// ============================================================================
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minuto
+const RATE_LIMIT_MAX_REQUESTS = 5;
+
+function checkRateLimit(groupId) {
+  const now = Date.now();
+  const key = groupId;
+  
+  if (!rateLimitMap.has(key)) {
+    rateLimitMap.set(key, { count: 1, windowStart: now });
+    return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - 1 };
+  }
+  
+  const entry = rateLimitMap.get(key);
+  
+  // Reset window if expired
+  if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry.count = 1;
+    entry.windowStart = now;
+    return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - 1 };
+  }
+  
+  // Check limit
+  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
+    const waitTime = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - entry.windowStart)) / 1000);
+    return { allowed: false, remaining: 0, waitTime };
+  }
+  
+  entry.count++;
+  return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - entry.count };
+}
+
 
 // ============================================================================
 // BUG FIX #6: Validacao de UUID para session IDs
@@ -499,6 +534,15 @@ app.post("/webhook", async (req, res) => {
       since: Math.floor((Date.now() - v) / 1000) + "s"
     }));
     res.json({ locks: locks });
+    return;
+  }
+
+
+  // TIER 2: Rate limiting
+  const rateLimit = checkRateLimit(msg.from);
+  if (!rateLimit.allowed) {
+    res.json({ status: "rate_limited" });
+    await sendWhatsApp(msg.from, config.botPrefix + " Limite de mensagens atingido. Aguarde " + rateLimit.waitTime + " segundos.");
     return;
   }
 
