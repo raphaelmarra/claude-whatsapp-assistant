@@ -4,21 +4,23 @@ services:
     container_name: cnpj-assistant
     restart: unless-stopped
     init: true
+    env_file:
+      - .env
     environment:
-      - SERVICE_NAME=cnpj-assistant
-      - PORT=3025
-      - EVOLUTION_API_URL=https://evolutionapi2.sdebot.top
-      - EVOLUTION_API_KEY=429683C4C977415CAAFCCE10F7D57E11
-      - EVOLUTION_INSTANCE=R
-      - WHATSAPP_GROUP_ID=120363423903208895@g.us
-      - "BOT_PREFIX=CLAUDE:"
-      - BACKEND_API_URL=http://cnpj-cli:3015
-      - CLAUDE_TIMEOUT_MS=300000
-      - REDIS_URL=redis://redis:6379
-      - SESSION_TTL_SECONDS=1800
-      - PROMPT_FILE=prompts/system-prompt.md
+      SERVICE_NAME: cnpj-assistant
+      PORT: "3025"
+      EVOLUTION_API_URL: https://evolutionapi2.sdebot.top
+      EVOLUTION_INSTANCE: R
+      WHATSAPP_GROUP_ID: 120363423903208895@g.us
+      BOT_PREFIX: "CLAUDE:"
+      BACKEND_API_URL: http://cnpj-cli:3015
+      CLAUDE_TIMEOUT_MS: "300000"
+      REDIS_URL: redis://redis:6379
+      SESSION_TTL_SECONDS: "1800"
+      PROMPT_FILE: prompts/system-prompt.md
     volumes:
       - ./prompts:/app/prompts:ro
+      - ./CLAUDE.md:/app/CLAUDE.md:ro
       - /root/.claude:/home/cnpjapp/.claude
     networks:
       - easypanel

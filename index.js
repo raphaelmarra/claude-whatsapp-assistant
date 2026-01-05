@@ -1,5 +1,5 @@
 // ============================================================================
-// CNPJ ASSISTANT v4.2.0 - Redis Session + Claude CLI --resume + Auto CSV Detection
+// CNPJ ASSISTANT v4.3.0 - Redis Session + Claude CLI --resume + Bug Fixes
 // ============================================================================
 
 const express = require("express");
@@ -14,7 +14,7 @@ app.use(express.json({ limit: "10mb" }));
 const config = {
   port: process.env.PORT || 3025,
   serviceName: process.env.SERVICE_NAME || "cnpj-assistant",
-  version: "4.2.0",
+  version: "4.3.0",
   evolutionUrl: process.env.EVOLUTION_API_URL || "https://evolutionapi2.sdebot.top",
   evolutionKey: process.env.EVOLUTION_API_KEY || "",
   evolutionInstance: process.env.EVOLUTION_INSTANCE || "R",
@@ -27,10 +27,54 @@ const config = {
   promptFile: process.env.PROMPT_FILE || "prompts/system-prompt.md",
 };
 
-const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+// ============================================================================
+// BUG FIX #2: Lock por groupId para evitar race condition em sessoes
+// ============================================================================
+const sessionLocks = new Map();
+
+async function acquireLock(groupId, timeoutMs = 310000) {
+  const start = Date.now();
+  while (sessionLocks.has(groupId)) {
+    if (Date.now() - start > timeoutMs) {
+      console.warn("[Lock] Timeout aguardando lock para " + groupId);
+      return false;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  sessionLocks.set(groupId, Date.now());
+  return true;
+}
+
+function releaseLock(groupId) {
+  sessionLocks.delete(groupId);
+}
+
+// ============================================================================
+// BUG FIX #6: Validacao de UUID para session IDs
+// ============================================================================
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidSessionId(sessionId) {
+  return sessionId && UUID_REGEX.test(sessionId);
+}
+
+// ============================================================================
+// Redis Connection
+// ============================================================================
+const redis = new Redis(config.redisUrl, {
+  maxRetriesPerRequest: 3,
+  lazyConnect: true,
+  retryDelayOnFailover: 100,
+  enableReadyCheck: true
+});
+
 redis.on("connect", () => console.log("[Redis] Conectado"));
 redis.on("error", (err) => console.error("[Redis] Erro:", err.message));
+redis.on("close", () => console.warn("[Redis] Conexao fechada"));
 
+// ============================================================================
+// Prompt Loading
+// ============================================================================
 function loadPrompt() {
   const promptPath = path.join(__dirname, config.promptFile);
   if (!fs.existsSync(promptPath)) return "Voce e um assistente.";
@@ -46,101 +90,223 @@ function loadPrompt() {
 
 let SYSTEM_PROMPT = loadPrompt();
 
+// ============================================================================
+// Session Management
+// ============================================================================
 function getSessionKey(groupId) { return "cnpj:session:" + groupId; }
 
 async function getSessionId(groupId) {
-  try { return await redis.get(getSessionKey(groupId)); }
-  catch (e) { return null; }
+  try {
+    const sessionId = await redis.get(getSessionKey(groupId));
+    // BUG FIX #6: Validar UUID antes de retornar
+    if (sessionId && !isValidSessionId(sessionId)) {
+      console.warn("[Session] ID invalido encontrado, limpando: " + sessionId);
+      await clearSession(groupId);
+      return null;
+    }
+    return sessionId;
+  } catch (e) {
+    console.error("[Session] Erro ao buscar: " + e.message);
+    return null;
+  }
 }
 
 async function saveSessionId(groupId, sessionId) {
-  try { await redis.setex(getSessionKey(groupId), config.sessionTtl, sessionId); return true; }
-  catch (e) { return false; }
+  try {
+    // BUG FIX #6: Validar UUID antes de salvar
+    if (!isValidSessionId(sessionId)) {
+      console.warn("[Session] Tentativa de salvar ID invalido: " + sessionId);
+      return false;
+    }
+    await redis.setex(getSessionKey(groupId), config.sessionTtl, sessionId);
+    return true;
+  } catch (e) {
+    console.error("[Session] Erro ao salvar: " + e.message);
+    return false;
+  }
 }
 
 async function clearSession(groupId) {
-  try { await redis.del(getSessionKey(groupId)); return true; }
-  catch (e) { return false; }
+  try {
+    await redis.del(getSessionKey(groupId));
+    console.log("[Session] Limpa para " + groupId.slice(0, 15) + "...");
+    return true;
+  } catch (e) {
+    console.error("[Session] Erro ao limpar: " + e.message);
+    return false;
+  }
 }
 
+// ============================================================================
+// BUG FIX #4: Lista especifica de erros que invalidam sessao
+// ============================================================================
+const SESSION_INVALIDATING_ERRORS = [
+  "session not found",
+  "session expired",
+  "invalid session",
+  "conversation id not found",
+  "conversation not found",
+  "resume failed",
+  "could not resume"
+];
+
+function shouldClearSession(stderr) {
+  const lower = stderr.toLowerCase();
+  return SESSION_INVALIDATING_ERRORS.some(err => lower.includes(err));
+}
+
+// ============================================================================
+// Claude CLI Integration - COM TODOS OS BUG FIXES
+// ============================================================================
 async function sendToClaude(groupId, message) {
-  return new Promise(async (resolve) => {
-    const startTime = Date.now();
-    const sessionId = await getSessionId(groupId);
-    const fullPrompt = sessionId ? message : SYSTEM_PROMPT + "\n\nMensagem:\n" + message;
-    const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
+  // BUG FIX #2: Adquirir lock antes de processar
+  const lockAcquired = await acquireLock(groupId);
+  if (!lockAcquired) {
+    return {
+      text: config.botPrefix + " Sistema ocupado. Aguarde e tente novamente.",
+      error: true
+    };
+  }
 
-    if (sessionId) {
-      args.unshift("--resume", sessionId);
-      console.log("[Claude] Resumindo: " + sessionId.slice(0, 8) + "...");
-    } else {
-      console.log("[Claude] Nova sessao");
-    }
+  try {
+    return await new Promise(async (resolve) => {
+      const startTime = Date.now();
+      const sessionId = await getSessionId(groupId);
+      const fullPrompt = sessionId ? message : SYSTEM_PROMPT + "\n\nMensagem:\n" + message;
+      const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
 
-    const claude = spawn("claude", args);
-    let stdout = "", stderr = "", killed = false;
-
-    const timeoutId = setTimeout(() => {
-      if (!killed) {
-        killed = true;
-        claude.kill("SIGTERM");
-        resolve({ text: config.botPrefix + " Timeout.", error: true });
+      if (sessionId) {
+        args.unshift("--resume", sessionId);
+        console.log("[Claude] Resumindo: " + sessionId.slice(0, 8) + "...");
+      } else {
+        console.log("[Claude] Nova sessao");
       }
-    }, config.claudeTimeout);
 
-    claude.stdout.on("data", (d) => { stdout += d.toString(); });
-    claude.stderr.on("data", (d) => { stderr += d.toString(); });
+      const claude = spawn("claude", args, {
+        env: { ...process.env },
+        stdio: ["pipe", "pipe", "pipe"]
+      });
 
-    claude.on("close", async (code) => {
-      clearTimeout(timeoutId);
-      if (killed) return;
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      let stdout = "", stderr = "", killed = false, resolved = false;
 
-      if (code !== 0) {
-        console.error("[Claude] Erro code " + code + ": " + stderr.slice(0, 200));
-        if (stderr.includes("session") || stderr.includes("conversation")) {
+      // Helper para resolver apenas uma vez
+      const safeResolve = (result) => {
+        if (!resolved) {
+          resolved = true;
+          resolve(result);
+        }
+      };
+
+      // BUG FIX #1: SIGKILL + cleanup de processos zombie
+      const timeoutId = setTimeout(async () => {
+        if (!killed && !resolved) {
+          killed = true;
+          console.warn("[Claude] Timeout atingido (" + config.claudeTimeout + "ms), matando processo...");
+
+          // Tentar SIGTERM primeiro
+          claude.kill("SIGTERM");
+
+          // Se nao morrer em 5s, usar SIGKILL
+          setTimeout(() => {
+            try {
+              claude.kill("SIGKILL");
+            } catch (e) {
+              // Processo ja morreu
+            }
+          }, 5000);
+
+          // Limpar sessao em timeout para evitar estado corrompido
           await clearSession(groupId);
-          console.log("[Claude] Sessao limpa por erro");
-        }
-        resolve({ text: config.botPrefix + " Erro. Tente novamente.", error: true });
-        return;
-      }
 
-      try {
-        const lines = stdout.trim().split("\n");
-        const result = JSON.parse(lines[lines.length - 1]);
-        if (result.session_id) {
-          await saveSessionId(groupId, result.session_id);
-          console.log("[Claude] Session salva: " + result.session_id.slice(0, 8) + "...");
+          safeResolve({
+            text: config.botPrefix + " Timeout na consulta. Tente uma pergunta mais especifica.",
+            error: true
+          });
         }
-        let response = result.result || "";
-        if (!response.startsWith(config.botPrefix)) {
-          response = config.botPrefix + " " + response;
+      }, config.claudeTimeout);
+
+      claude.stdout.on("data", (d) => { stdout += d.toString(); });
+      claude.stderr.on("data", (d) => { stderr += d.toString(); });
+
+      claude.on("close", async (code, signal) => {
+        clearTimeout(timeoutId);
+
+        if (killed || resolved) {
+          console.log("[Claude] Processo encerrado (killed=" + killed + ", signal=" + signal + ")");
+          return;
         }
-        console.log("[Claude] (" + duration + "s): " + response.slice(0, 80) + "...");
-        resolve({ text: response, sessionId: result.session_id, duration: duration });
-      } catch (e) {
-        console.error("[Claude] Parse error: " + e.message);
-        let response = stdout.trim();
-        if (!response.startsWith(config.botPrefix)) {
-          response = config.botPrefix + " " + response;
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+        if (code !== 0) {
+          console.error("[Claude] Erro code " + code + ": " + stderr.slice(0, 300));
+
+          // BUG FIX #4: Limpeza especifica de sessao
+          if (shouldClearSession(stderr)) {
+            await clearSession(groupId);
+            console.log("[Claude] Sessao limpa por erro especifico de sessao");
+          }
+
+          safeResolve({
+            text: config.botPrefix + " Erro ao processar. Tente novamente.",
+            error: true
+          });
+          return;
         }
-        resolve({ text: response });
-      }
+
+        try {
+          const lines = stdout.trim().split("\n");
+          const result = JSON.parse(lines[lines.length - 1]);
+
+          if (result.session_id) {
+            const saved = await saveSessionId(groupId, result.session_id);
+            if (saved) {
+              console.log("[Claude] Session salva: " + result.session_id.slice(0, 8) + "...");
+            }
+          }
+
+          let response = result.result || "";
+          if (!response.startsWith(config.botPrefix)) {
+            response = config.botPrefix + " " + response;
+          }
+
+          console.log("[Claude] (" + duration + "s): " + response.slice(0, 80) + "...");
+          safeResolve({
+            text: response,
+            sessionId: result.session_id,
+            duration: duration
+          });
+        } catch (e) {
+          console.error("[Claude] Parse error: " + e.message);
+          let response = stdout.trim();
+          if (!response.startsWith(config.botPrefix)) {
+            response = config.botPrefix + " " + response;
+          }
+          safeResolve({ text: response });
+        }
+      });
+
+      claude.on("error", (err) => {
+        clearTimeout(timeoutId);
+        console.error("[Claude] Spawn error: " + err.message);
+        safeResolve({
+          text: config.botPrefix + " Erro interno do sistema.",
+          error: true
+        });
+      });
+
+      claude.stdin.write(fullPrompt);
+      claude.stdin.end();
     });
-
-    claude.on("error", (err) => {
-      clearTimeout(timeoutId);
-      console.error("[Claude] Spawn error: " + err.message);
-      resolve({ text: config.botPrefix + " Erro interno.", error: true });
-    });
-
-    claude.stdin.write(fullPrompt);
-    claude.stdin.end();
-  });
+  } finally {
+    // BUG FIX #2: Sempre liberar lock
+    releaseLock(groupId);
+  }
 }
 
-// Enviar documento via Evolution API
+// ============================================================================
+// WhatsApp Integration via Evolution API
+// ============================================================================
 async function sendWhatsAppDocument(to, content, filename, caption) {
   try {
     const base64Content = Buffer.from(content, "utf-8").toString("base64");
@@ -166,7 +332,6 @@ async function sendWhatsAppDocument(to, content, filename, caption) {
   }
 }
 
-// Detectar blocos CSV na resposta: [CSV:arquivo.csv]conteudo[/CSV]
 function parseResponseForDocuments(response) {
   const csvRegex = /\[CSV:([^\]]+)\]\n([\s\S]*?)\n\[\/CSV\]/g;
   const documents = [];
@@ -190,6 +355,7 @@ function parseResponseForDocuments(response) {
 async function sendWhatsApp(to, text) {
   const MAX = 60000;
   if (text.length <= MAX) return sendWhatsAppSingle(to, text);
+
   const chunks = [];
   let rem = text;
   while (rem.length > 0) {
@@ -199,6 +365,7 @@ async function sendWhatsApp(to, text) {
     chunks.push(rem.substring(0, cut));
     rem = rem.substring(cut).trim();
   }
+
   console.log("[Evolution] Dividindo em " + chunks.length + " partes");
   for (let i = 0; i < chunks.length; i++) {
     const pre = chunks.length > 1 ? "[" + (i+1) + "/" + chunks.length + "] " : "";
@@ -222,7 +389,6 @@ async function sendWhatsAppSingle(to, text) {
   }
 }
 
-// Buscar arquivos CSV criados pelo Claude em /app
 async function findAndSendCSVFiles(to) {
   const appDir = "/app";
   let csvFiles = [];
@@ -241,7 +407,7 @@ async function findAndSendCSVFiles(to) {
       const content = fs.readFileSync(filePath, "utf-8");
       console.log("[CSV] Encontrado arquivo: " + csvFile + " (" + content.length + " bytes)");
       await sendWhatsAppDocument(to, content, csvFile, "Dados exportados");
-      fs.unlinkSync(filePath); // Remove após enviar
+      fs.unlinkSync(filePath);
       console.log("[CSV] Arquivo enviado e removido: " + csvFile);
       sent.push(csvFile);
       await new Promise(r => setTimeout(r, 500));
@@ -252,31 +418,23 @@ async function findAndSendCSVFiles(to) {
   return sent;
 }
 
-// Enviar resposta com suporte a documentos
 async function sendResponse(to, response) {
-  // 1. Verificar arquivos CSV criados pelo Claude
   const csvFilesSent = await findAndSendCSVFiles(to);
-
-  // 2. Verificar formato especial [CSV:arquivo.csv]...[/CSV]
   const parsed = parseResponseForDocuments(response);
 
-  // Enviar documentos do formato especial
   for (const doc of parsed.documents) {
     console.log("[Response] Enviando documento inline: " + doc.filename);
     await sendWhatsAppDocument(to, doc.content, doc.filename, "Arquivo exportado");
     await new Promise(r => setTimeout(r, 500));
   }
 
-  // Limpar menções a arquivos locais na resposta
   let cleanResponse = parsed.text;
   if (csvFilesSent.length > 0) {
-    // Remove menções a paths de arquivos salvos
     cleanResponse = cleanResponse.replace(/`\/app\/[^`]+\.csv`/g, "");
     cleanResponse = cleanResponse.replace(/CSV gerado com sucesso:[^\n]+/g, "");
     cleanResponse = cleanResponse.trim();
   }
 
-  // Enviar texto restante
   const totalDocs = csvFilesSent.length + parsed.documents.length;
   if (cleanResponse && cleanResponse.length > 0) {
     await sendWhatsApp(to, cleanResponse);
@@ -285,6 +443,9 @@ async function sendResponse(to, response) {
   }
 }
 
+// ============================================================================
+// Webhook Handler
+// ============================================================================
 function parseWebhook(p) {
   try {
     const d = p.data || {};
@@ -303,6 +464,7 @@ function parseWebhook(p) {
 app.post("/webhook", async (req, res) => {
   const start = Date.now();
   const p = req.body;
+
   if (p.event !== "messages.upsert") return res.json({ status: "ignored" });
 
   const msg = parseWebhook(p);
@@ -331,32 +493,59 @@ app.post("/webhook", async (req, res) => {
     return;
   }
 
+  if (cmd === "/locks") {
+    const locks = Array.from(sessionLocks.entries()).map(([k, v]) => ({
+      group: k.slice(0, 15) + "...",
+      since: Math.floor((Date.now() - v) / 1000) + "s"
+    }));
+    res.json({ locks: locks });
+    return;
+  }
+
   console.log("[Webhook] " + msg.pushName + ": \"" + msg.text.slice(0, 50) + "...\"");
   res.json({ status: "processing" });
 
+  // BUG FIX #7: Catch duplo para garantir log de erros
   (async () => {
     try {
       const r = await sendToClaude(msg.from, msg.text);
       await sendResponse(msg.from, r.text);
       console.log("[Webhook] Processado em " + (Date.now() - start) + "ms");
     } catch (e) {
-      console.error("[Webhook] Erro: " + e.message);
-      await sendWhatsApp(msg.from, config.botPrefix + " Erro. Tente novamente.");
+      console.error("[Webhook] Erro principal: " + e.message);
+      console.error("[Webhook] Stack: " + e.stack);
+      try {
+        await sendWhatsApp(msg.from, config.botPrefix + " Erro. Tente novamente.");
+      } catch (sendError) {
+        console.error("[Webhook] Falha ao enviar erro: " + sendError.message);
+      }
     }
-  })();
+  })().catch(err => {
+    console.error("[Webhook] Erro nao capturado: " + err.message);
+    console.error("[Webhook] Stack: " + err.stack);
+  });
 });
 
+// ============================================================================
+// Health & Admin Endpoints
+// ============================================================================
 app.get("/health", async (req, res) => {
   let rok = false;
   try { await redis.ping(); rok = true; } catch (e) {}
+
   res.json({
     status: "ok",
     service: config.serviceName,
     version: config.version,
-    architecture: "Claude --resume + Redis + Documents",
+    architecture: "Claude --resume + Redis + Bug Fixes",
     redis: rok ? "connected" : "disconnected",
-    uptime: process.uptime(),
-    sessionTtl: config.sessionTtl
+    activeLocks: sessionLocks.size,
+    uptime: Math.floor(process.uptime()),
+    sessionTtl: config.sessionTtl,
+    memory: {
+      heapUsedMB: Math.floor(process.memoryUsage().heapUsed / 1024 / 1024),
+      rssMB: Math.floor(process.memoryUsage().rss / 1024 / 1024)
+    }
   });
 });
 
@@ -370,28 +559,84 @@ app.post("/clear-session/:gid", async (req, res) => {
   res.json({ ok: ok });
 });
 
+app.post("/clear-all-sessions", async (req, res) => {
+  try {
+    const keys = await redis.keys("cnpj:session:*");
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
+    res.json({ ok: true, cleared: keys.length });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/", (req, res) => {
   res.json({
     name: config.serviceName,
     version: config.version,
-    description: "CNPJ Assistant com memoria via Claude --resume + Redis + CSV Documents",
-    commands: ["/reset - limpa contexto", "/sessao - info da sessao"]
+    description: "CNPJ Assistant v4.3 - com bug fixes para timeout e sessoes",
+    commands: [
+      "/reset - limpa contexto",
+      "/sessao - info da sessao",
+      "/locks - mostra locks ativos"
+    ],
+    fixes: [
+      "SIGKILL para processos zombie",
+      "Lock por grupo para race condition",
+      "Validacao UUID de sessao",
+      "Limpeza especifica de erros de sessao",
+      "Catch duplo para erros async"
+    ]
   });
 });
 
+// ============================================================================
+// Graceful Shutdown
+// ============================================================================
+process.on("SIGTERM", async () => {
+  console.log("[Shutdown] Recebido SIGTERM, encerrando...");
+  try {
+    await redis.quit();
+  } catch (e) {}
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  console.log("[Shutdown] Recebido SIGINT, encerrando...");
+  try {
+    await redis.quit();
+  } catch (e) {}
+  process.exit(0);
+});
+
+// ============================================================================
+// Startup
+// ============================================================================
 (async () => {
-  try { await redis.connect(); } catch (e) {
+  try {
+    await redis.connect();
+  } catch (e) {
     console.error("[Redis] Conexao falhou: " + e.message);
   }
+
   app.listen(config.port, () => {
     console.log("============================================");
     console.log("  CNPJ-ASSISTANT v" + config.version);
-    console.log("  Claude --resume + Redis + Documents");
+    console.log("  Claude --resume + Redis + Bug Fixes");
     console.log("============================================");
     console.log("  Porta: " + config.port);
     console.log("  Grupo: " + (config.groupId || "(todos)"));
     console.log("  Redis: " + config.redisUrl);
     console.log("  TTL Sessao: " + config.sessionTtl + "s");
+    console.log("  Timeout Claude: " + config.claudeTimeout + "ms");
+    console.log("============================================");
+    console.log("  FIXES APLICADOS:");
+    console.log("  - Bug #1: SIGKILL para zombie processes");
+    console.log("  - Bug #2: Lock por grupo (race condition)");
+    console.log("  - Bug #4: Limpeza especifica de sessao");
+    console.log("  - Bug #6: Validacao UUID sessao");
+    console.log("  - Bug #7: Catch duplo async");
     console.log("============================================");
   });
 })();
