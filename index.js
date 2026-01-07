@@ -20,7 +20,7 @@ app.use(express.json({ limit: "10mb" }));
 const config = {
   port: process.env.PORT || 3025,
   serviceName: process.env.SERVICE_NAME || "cnpj-assistant",
-  version: "4.7.0",
+  version: "4.8.0",
   evolutionUrl: process.env.EVOLUTION_API_URL || "https://evolutionapi2.sdebot.top",
   evolutionKey: process.env.EVOLUTION_API_KEY || "",
   evolutionInstance: process.env.EVOLUTION_INSTANCE || "R",
@@ -173,7 +173,7 @@ async function getSessionId(groupId) {
     // BUG FIX #6: Validar UUID antes de retornar
     if (sessionId && !isValidSessionId(sessionId)) {
       console.warn("[Session] ID invalido encontrado, limpando: " + sessionId);
-      await clearSession(groupId);
+      // await clearSession(groupId); // COMENTADO: manter sessao ativa
       return null;
     }
     return sessionId;
@@ -287,8 +287,8 @@ async function sendToClaude(groupId, message) {
             }
           }, 5000);
 
-          // Limpar sessao em timeout para evitar estado corrompido
-          await clearSession(groupId);
+          // FIX Problema 3: NAO limpar sessao no timeout - manter contexto para retry
+          // await clearSession(groupId); // COMENTADO: manter sessao ativa
 
           safeResolve({
             text: config.botPrefix + " Timeout na consulta. Tente uma pergunta mais especifica.",
@@ -315,7 +315,7 @@ async function sendToClaude(groupId, message) {
 
           // BUG FIX #4: Limpeza especifica de sessao
           if (shouldClearSession(stderr)) {
-            await clearSession(groupId);
+            // await clearSession(groupId); // COMENTADO: manter sessao ativa
             console.log("[Claude] Sessao limpa por erro especifico de sessao");
           }
 
