@@ -1,127 +1,178 @@
-# Claude WhatsApp Assistant v4.2.0
+# CNPJ Assistant v4.3.0
 
-Assistente WhatsApp com **memoria de contexto** usando Claude CLI + Redis.
-Suporte a **envio de arquivos CSV** como documentos.
-
-## Arquitetura
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  WhatsApp   │────▶│ Evolution API│────▶│  Este Sistema   │
-│  (Usuario)  │◀────│  (Webhook)   │◀────│  (Node.js)      │
-└─────────────┘     └──────────────┘     └────────┬────────┘
-                                                  │
-                    ┌─────────────────────────────┼─────────────────────────────┐
-                    │                             ▼                             │
-                    │  ┌─────────┐    ┌───────────────────┐    ┌─────────────┐ │
-                    │  │  Redis  │◀──▶│    Claude CLI     │───▶│  Backend    │ │
-                    │  │(sessoes)│    │ (--resume + JSON) │    │  API        │ │
-                    │  └─────────┘    └───────────────────┘    └─────────────┘ │
-                    │                             │                             │
-                    │                             ▼                             │
-                    │                    ┌─────────────────┐                    │
-                    │                    │  CSV Detection  │                    │
-                    │                    │  (auto-send)    │                    │
-                    │                    └─────────────────┘                    │
-                    └───────────────────────────────────────────────────────────┘
-```
-
-## Features
-
-- **Memoria de Contexto:** Claude lembra conversas anteriores (30 min TTL)
-- **Envio de CSV:** Arquivos CSV sao enviados automaticamente como documentos
-- **Comandos WhatsApp:** /reset, /sessao
-- **Hot Reload:** Recarrega prompt sem reiniciar
+> Bot WhatsApp com memoria de contexto para consultas CNPJ usando Claude CLI + Redis
 
 ## Quick Start
 
 ```bash
-# 1. Clone
-git clone https://github.com/raphaelmarra/claude-whatsapp-assistant.git
-cd claude-whatsapp-assistant
-
-# 2. Configure
-cp docker-compose.yml.example docker-compose.yml
-# Edite as variaveis de ambiente
-
-# 3. Crie seu prompt
-nano prompts/system-prompt.md
-
-# 4. Deploy
+cd /root/cnpj-assistant
 docker compose up -d
+curl http://localhost:3025/health
 ```
+
+## Arquitetura
+
+```
+[WhatsApp]
+     |
+     v
+[Evolution API] -----> [webhook-router:3020]
+                              |
+                              v
+                    +-------------------+
+                    |  cnpj-assistant   |
+                    |      :3025        |
+                    +--------+----------+
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
+     [Redis]          [Claude CLI]       [Evolution API]
+    (sessoes)         (--resume)          (resposta)
+          |                  |
+          v                  v
+    TTL 30min          [cnpj-cli:3015]
+                         (API CNPJ)
+```
+
+## Endpoints (6)
+
+| Metodo | Path                | Descricao                    |
+|--------|---------------------|------------------------------|
+| GET    | /                   | Info do servico              |
+| GET    | /health             | Health check + Redis status  |
+| POST   | /webhook            | Recebe msgs Evolution API    |
+| POST   | /reload-prompt      | Recarrega prompt sem restart |
+| POST   | /clear-session/:gid | Limpa sessao de um grupo     |
+| POST   | /clear-all-sessions | Limpa todas as sessoes       |
+
+## Filtro de Mencao
+
+**O bot SO responde se a mensagem contiver:**
+- `jarvis` (qualquer posicao)
+- `@jarvis` (com arroba)
+
+Mensagens sem mencao sao ignoradas silenciosamente.
 
 ## Comandos WhatsApp
 
-| Comando | Funcao |
-|---------|--------|
-| `/reset` | Limpa sessao e contexto |
-| `/sessao` | Mostra info da sessao ativa |
+| Comando            | Alias    | Funcao                     |
+|--------------------|----------|----------------------------|
+| /reset             | /limpar  | Limpa sessao e contexto    |
+| /sessao            | /status  | Info da sessao ativa       |
+| /locks             | -        | Debug de locks ativos      |
 
-## Variaveis de Ambiente
+## Variaveis de Ambiente (12)
 
-| Variavel | Obrigatoria | Descricao |
-|----------|-------------|-----------|
-| EVOLUTION_API_URL | Sim | URL do Evolution API |
-| EVOLUTION_API_KEY | Sim | API Key do Evolution |
-| EVOLUTION_INSTANCE | Sim | Nome da instancia |
-| WHATSAPP_GROUP_ID | Nao | Filtrar por grupo (vazio = todos) |
-| REDIS_URL | Sim | URL do Redis |
-| SESSION_TTL_SECONDS | Nao | TTL sessao (default: 1800) |
-| BACKEND_API_URL | Sim | URL da API de backend |
-| BOT_PREFIX | Nao | Prefixo das respostas (default: CLAUDE:) |
-| PROMPT_FILE | Nao | Caminho do prompt (default: prompts/system-prompt.md) |
+| Variavel             | Default (codigo)                 | Producao (docker-compose)        |
+|----------------------|----------------------------------|----------------------------------|
+| PORT                 | 3025                             | 3025                             |
+| SERVICE_NAME         | cnpj-assistant                   | cnpj-assistant                   |
+| EVOLUTION_API_URL    | https://evolutionapi2.sdebot.top | https://evolutionapi2.sdebot.top |
+| EVOLUTION_API_KEY    | (vazio)                          | (via .env)                       |
+| EVOLUTION_INSTANCE   | R                                | jarvis                           |
+| WHATSAPP_GROUP_ID    | (vazio = todos)                  | 120363423903208895@g.us          |
+| BOT_PREFIX           | CLAUDE:                          | CLAUDE:                          |
+| BACKEND_API_URL      | http://cnpj-cli:3015             | http://cnpj-cli:3015             |
+| CLAUDE_TIMEOUT_MS    | 180000                           | 180000                           |
+| REDIS_URL            | redis://redis:6379               | redis://redis:6379               |
+| SESSION_TTL_SECONDS  | 1800                             | 1800                             |
+| PROMPT_FILE          | prompts/system-prompt.md         | prompts/system-prompt.md         |
 
-## Estrutura
+**Nota:** Defaults do codigo diferem de producao em EVOLUTION_INSTANCE e WHATSAPP_GROUP_ID
+
+## Funcionalidades v4.3
+
+| Feature              | Descricao                                    |
+|----------------------|----------------------------------------------|
+| Memoria              | Claude --resume + Redis (TTL 30min)          |
+| Filtro @jarvis       | So processa se mencionar jarvis              |
+| Rate Limit           | 5 req/min por grupo                          |
+| Lock                 | Evita race condition em sessoes              |
+| CSV Auto             | Detecta e envia arquivos CSV                 |
+| Bug Fixes            | Timeout, zombie processes, UUID validation   |
+
+## Estrutura do Projeto
 
 ```
-claude-whatsapp-assistant/
-├── index.js              # Logica principal
-├── package.json          # Dependencias (express, ioredis)
-├── Dockerfile            # Node 20 Alpine + Claude CLI
-├── docker-compose.yml    # Configuracao
+cnpj-assistant/
+├── index.js              # Logica principal (23KB)
+├── package.json          # express, ioredis
+├── Dockerfile            # Node 20 + Tini + Claude CLI
+├── docker-compose.yml    # Config producao
+├── .env                  # API Key (gitignore)
 ├── prompts/
-│   └── system-prompt.md  # SEU PROMPT AQUI
+│   └── system-prompt.md  # Prompt do Claude
 ├── README.md             # Este arquivo
 ├── AI-CONTEXT.md         # Contexto para IAs
-└── CLAUDE.md             # Instrucoes de manutencao
+├── CLAUDE.md             # Contexto conciso
+└── SCALING-GUIDE.md      # Como replicar
 ```
 
-## Como Replicar para Outro Sistema
+## Stack
 
-Veja `AI-CONTEXT.md` para instrucoes detalhadas de como adaptar
-este sistema para qualquer outro caso de uso.
+- **Runtime:** Node.js 20 Alpine
+- **Framework:** Express.js
+- **CLI:** Claude Code (--resume)
+- **Cache:** Redis (ioredis)
+- **Init:** Tini (PID 1)
+- **Porta:** 3025
+- **Rede:** easypanel
 
-## Endpoints HTTP
+## Comandos Uteis
 
-| Metodo | Path | Descricao |
-|--------|------|-----------|
-| POST | /webhook | Recebe mensagens do Evolution API |
-| GET | /health | Health check com status do Redis |
-| POST | /reload-prompt | Recarrega prompt sem reiniciar |
-| POST | /clear-session/:gid | Limpa sessao de um grupo |
-| GET | / | Info do servico |
+```bash
+# Ver logs
+docker logs cnpj-assistant --tail 50
 
-## Requisitos
+# Health check
+curl -s http://localhost:3025/health | jq
 
-- Docker + Docker Compose
-- Redis
-- Evolution API configurado
-- Claude CLI autenticado no host (`/root/.claude`)
+# Restart
+docker compose restart
 
-## Changelog
+# Rebuild completo
+docker compose build --no-cache && docker compose up -d
 
-### v4.2.0
-- Auto-deteccao e envio de CSV como documentos
-- Limpeza automatica de arquivos apos envio
+# Testar Claude CLI
+docker exec cnpj-assistant claude --version
 
-### v4.1.0
-- Suporte a formato [CSV:arquivo.csv]...[/CSV]
-- Funcao sendWhatsAppDocument
+# Limpar sessao de um grupo
+curl -X POST http://localhost:3025/clear-session/GRUPO_ID
 
-### v4.0.0
-- Memoria de contexto via Claude --resume + Redis
-- Reducao de ~78% no consumo de tokens
+# Limpar todas sessoes
+curl -X POST http://localhost:3025/clear-all-sessions
+
+# Recarregar prompt
+curl -X POST http://localhost:3025/reload-prompt
+```
+
+## Integracao com webhook-router
+
+O cnpj-assistant recebe mensagens do webhook-router:
+
+```
+Grupo CNPJ (120363423903208895@g.us)
+    -> webhook-router:3020
+    -> cnpj-assistant:3025/webhook
+```
+
+## Linhas de Codigo Importantes
+
+| Funcionalidade    | Arquivo   | Linha |
+|-------------------|-----------|-------|
+| Config object     | index.js  | 13-28 |
+| Filtro mencao     | index.js  | 509   |
+| Cmd /reset        | index.js  | 515   |
+| Cmd /sessao       | index.js  | 522   |
+| Cmd /locks        | index.js  | 534   |
+| POST /webhook     | index.js  | 499   |
+| GET /health       | index.js  | 579   |
+
+## Como Replicar
+
+Ver **SCALING-GUIDE.md** para criar um novo assistant baseado neste.
 
 ---
-**MIT License** | [Repositorio](https://github.com/raphaelmarra/claude-whatsapp-assistant)
+**Gerado automaticamente:** 2026-01-05
+**Extraido de:** index.js v4.3.0 (auditado linha por linha)

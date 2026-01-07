@@ -1,6 +1,6 @@
 {
   "name": "cnpj-assistant",
-  "version": "4.0.0",
+  "version": "4.7.0",
   "description": "CNPJ Assistant com memoria via Claude --resume + Redis",
   "main": "index.js",
   "scripts": {

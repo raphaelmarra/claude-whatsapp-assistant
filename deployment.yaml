@@ -1,0 +1,80 @@
+# deployment.yaml - FONTE DE VERDADE DO SERVICO
+# Gerado por: /release
+# Data: 2026-01-07
+#
+# IMPORTANTE: Este arquivo define como o servico DEVE rodar.
+# O reconciliador usa este arquivo para garantir consistencia.
+# NAO EDITAR MANUALMENTE - Use /release para atualizar.
+
+service:
+  name: cnpj-assistant
+  version: 4.7.0
+  status: production
+
+project:
+  type: nodejs-simple
+  language: javascript
+  entrypoint: index.js
+
+runtime:
+  type: docker
+  container_name: cnpj-assistant
+  image: cnpj-assistant:4.7.0
+  network: easypanel
+  restart: unless-stopped
+
+ports:
+  internal: 3025
+  external: 3025
+
+infrastructure:
+  domain: null  # interno apenas
+  ssl: false
+  proxy: null
+
+paths:
+  source: /root/cnpj-assistant
+  compose: /root/cnpj-assistant/docker-compose.yml
+  logs: /var/log/cnpj-assistant
+
+build:
+  required: false
+  command: null
+
+tests:
+  configured: false
+  command: null
+  required_for_release: false
+
+healthcheck:
+  endpoint: /health
+  interval: 30s
+  timeout: 10s
+  retries: 3
+
+dependencies:
+  - service: redis
+    port: 6379
+    required: true
+  - service: cnpj-cli
+    port: 3015
+    required: true
+
+integrations:
+  - name: Evolution API
+    url: https://chat.sdebot.top
+    instance: jarvis
+  - name: WhatsApp Group
+    id: 120363423903208895@g.us
+
+rollback:
+  previous_version: null
+  strategy: redeploy
+  command: "/release cnpj-assistant --rollback"
+
+metadata:
+  created: 2026-01-07
+  updated: 2026-01-07
+  released_by: claude-code
+  repository: raphaelmarra/claude-whatsapp-assistant
+  commit: pending
