@@ -14,9 +14,9 @@ GET /:cnpj/regime → simples nacional / mei
 Exemplo: curl http://cnpj-cli:3015/api/cnpj/00000000000191/completo
 
 ### DESCOBRIR CNAE
-GET /cnae/buscar-texto?q=restaurante&limite=20
+GET /cnae/buscar-texto?texto=restaurante&limite=20
 
-Exemplo: curl "http://cnpj-cli:3015/api/cnpj/cnae/buscar-texto?q=comercio+embalagens"
+Exemplo: curl "http://cnpj-cli:3015/api/cnpj/cnae/buscar-texto?texto=comercio+embalagens"
 
 ### PROSPECTAR (BUSCA AVANCADA)
 POST /buscar/avancada

@@ -40,7 +40,7 @@ GET /:cnpj/filiais → filiais
 GET /:cnpj/regime → simples/mei
 
 ### DESCOBRIR CNAE
-GET /cnae/buscar-texto?q=embalagem&limite=20
+GET /cnae/buscar-texto?texto=embalagem&limite=20
 
 ### PROSPECTAR (PRINCIPAL)
 POST /buscar/avancada
