@@ -162,3 +162,51 @@ POST /clear-session/:gid → limpa sessao de um grupo
 ## REDIS
 
 Key: cnpj:session:{groupId} | TTL: 1800s
+
+## EXPORTAR DADOS
+
+Base: http://cnpj-cli:3015/api/cnpj/export
+
+### CSV, JSON, XLSX
+POST /export/csv
+POST /export/json
+POST /export/xlsx
+
+Body:
+{
+  "filtros": {
+    "uf": "SP",
+    "municipio": "SAO PAULO",
+    "cnae": "4742300",
+    "porte": "03",
+    "situacao": "02",
+    "natureza": "2062",
+    "capital_min": 10000,
+    "capital_max": 500000
+  },
+  "campos": ["cnpj_completo", "razao_social", "email", "telefone_1"],
+  "limite": 1000
+}
+
+Campos disponiveis:
+cnpj_completo, cnpj_basico, razao_social, nome_fantasia, situacao_cadastral,
+data_situacao_cadastral, natureza_juridica, capital_social, porte, cnae_fiscal,
+tipo_logradouro, logradouro, numero, complemento, bairro, cep, uf, municipio,
+ddd_1, telefone_1, ddd_2, telefone_2, email
+
+### PDF (lista ou relatorio)
+POST /export/pdf
+{
+  "filtros": { ... },
+  "tipo": "lista",
+  "limite": 1000
+}
+
+tipo: "lista" (tabela) ou "relatorio" (estatisticas agregadas)
+
+### LISTAS ESPECIALIZADAS
+POST /export/email-list → apenas empresas com email
+POST /export/telefone-list → apenas empresas com telefone
+POST /export/mailing → contato completo (email + tel + endereco)
+
+Body igual ao CSV (filtros + limite)

@@ -106,3 +106,21 @@ Situacao: 02=Ativa, 08=Baixada
 Porte: 01=Micro (ME+MEI), 03=EPP, 05=Demais
 Natureza: 2135=MEI, 2062=LTDA, 2046=SA
 Qualificacao: 49=Socio-Admin, 22=Socio
+
+---
+
+## EXPORTAR DADOS
+
+POST /export/csv | /export/json | /export/xlsx
+{
+  "filtros": {uf, municipio, cnae, porte, situacao, natureza, capital_min, capital_max},
+  "campos": ["cnpj_completo", "razao_social", "email", "telefone_1"],
+  "limite": 1000
+}
+
+POST /export/pdf
+{"filtros": {...}, "tipo": "lista" ou "relatorio", "limite": 1000}
+
+POST /export/email-list → so empresas com email
+POST /export/telefone-list → so empresas com telefone
+POST /export/mailing → contato completo
