@@ -10,9 +10,9 @@ services:
       SERVICE_NAME: cnpj-assistant
       PORT: "3025"
       EVOLUTION_API_URL: https://evolutionapi2.sdebot.top
-      EVOLUTION_INSTANCE: R
+      EVOLUTION_INSTANCE: jarvis
       WHATSAPP_GROUP_ID: 120363423903208895@g.us
-      BOT_PREFIX: "CLAUDE:"
+      BOT_PREFIX: "CNPJ:"
       BACKEND_API_URL: http://cnpj-cli:3015
       CLAUDE_TIMEOUT_MS: "180000"
       REDIS_URL: redis://redis:6379

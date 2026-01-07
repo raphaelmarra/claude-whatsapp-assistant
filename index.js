@@ -1,6 +1,10 @@
 // ============================================================================
-// CNPJ ASSISTANT v4.3.0 - Redis Session + Claude CLI --resume + Bug Fixes
+// CNPJ ASSISTANT v4.6.0 - Reply Detection + Redis Session + Claude CLI
 // ============================================================================
+// v4.6.0: Adicionado deduplicacao por messageId (fix resposta duplicada)
+// v4.5.0: Corrigido reply detection para Evolution API v2.3+
+//         - Extrai contextInfo de messageContextInfo.threadId (formato novo)
+//         - Usa BOT_LID em vez de BOT_JID (Evolution usa LID @lid, nao JID @s.whatsapp.net)
 
 const express = require("express");
 const { spawn } = require("child_process");
@@ -14,7 +18,7 @@ app.use(express.json({ limit: "10mb" }));
 const config = {
   port: process.env.PORT || 3025,
   serviceName: process.env.SERVICE_NAME || "cnpj-assistant",
-  version: "4.3.0",
+  version: "4.6.0",
   evolutionUrl: process.env.EVOLUTION_API_URL || "https://evolutionapi2.sdebot.top",
   evolutionKey: process.env.EVOLUTION_API_KEY || "",
   evolutionInstance: process.env.EVOLUTION_INSTANCE || "R",
@@ -25,6 +29,8 @@ const config = {
   redisUrl: process.env.REDIS_URL || "redis://redis:6379",
   sessionTtl: parseInt(process.env.SESSION_TTL_SECONDS) || 1800,
   promptFile: process.env.PROMPT_FILE || "prompts/system-prompt.md",
+  // v4.5.0: LID do bot para detectar replies (Evolution API usa LID, nao JID)
+  botLid: process.env.BOT_LID || "206850607837224",
 };
 
 // ============================================================================
@@ -58,31 +64,60 @@ const RATE_LIMIT_MAX_REQUESTS = 5;
 function checkRateLimit(groupId) {
   const now = Date.now();
   const key = groupId;
-  
+
   if (!rateLimitMap.has(key)) {
     rateLimitMap.set(key, { count: 1, windowStart: now });
     return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - 1 };
   }
-  
+
   const entry = rateLimitMap.get(key);
-  
+
   // Reset window if expired
   if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
     entry.count = 1;
     entry.windowStart = now;
     return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - 1 };
   }
-  
+
   // Check limit
   if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
     const waitTime = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - entry.windowStart)) / 1000);
     return { allowed: false, remaining: 0, waitTime };
   }
-  
+
   entry.count++;
   return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - entry.count };
 }
 
+// ============================================================================
+// BUG FIX #8: Deduplicacao por messageId (v4.6.0)
+// ============================================================================
+const processedMessages = new Map();
+const MESSAGE_DEDUP_TTL_MS = 60000; // 1 minuto
+
+function isMessageProcessed(messageId) {
+  if (!messageId) return false;
+  const processed = processedMessages.get(messageId);
+  if (processed && Date.now() - processed < MESSAGE_DEDUP_TTL_MS) {
+    return true;
+  }
+  return false;
+}
+
+function markMessageProcessed(messageId) {
+  if (!messageId) return;
+  processedMessages.set(messageId, Date.now());
+
+  // Limpeza periodica (evita memory leak)
+  if (processedMessages.size > 1000) {
+    const now = Date.now();
+    for (const [id, time] of processedMessages) {
+      if (now - time > MESSAGE_DEDUP_TTL_MS) {
+        processedMessages.delete(id);
+      }
+    }
+  }
+}
 
 // ============================================================================
 // BUG FIX #6: Validacao de UUID para session IDs
@@ -479,21 +514,72 @@ async function sendResponse(to, response) {
 }
 
 // ============================================================================
-// Webhook Handler
+// Webhook Handler - v4.5.0: Reply Detection (corrigido para Evolution API v2)
 // ============================================================================
 function parseWebhook(p) {
   try {
     const d = p.data || {};
     const k = d.key || {};
     const m = d.message || {};
-    const txt = m.conversation || (m.extendedTextMessage && m.extendedTextMessage.text) || "";
+    const extendedText = m.extendedTextMessage || {};
+    const txt = m.conversation || extendedText.text || "";
+
+    // v4.5.0: Evolution API v2 envia contextInfo em dois lugares possiveis:
+    // 1. extendedTextMessage.contextInfo (formato antigo)
+    // 2. messageContextInfo.threadId[0].threadKey (formato novo v2.3+)
+    let quotedParticipant = null;
+    let stanzaId = null;
+
+    // Tentar formato novo (messageContextInfo.threadId)
+    const msgCtxInfo = m.messageContextInfo || {};
+    const threadId = msgCtxInfo.threadId || [];
+    if (threadId.length > 0 && threadId[0].threadKey) {
+      const threadKey = threadId[0].threadKey;
+      quotedParticipant = threadKey.participant || null;
+      stanzaId = threadKey.id || null;
+    }
+
+    // Fallback para formato antigo (extendedTextMessage.contextInfo)
+    if (!quotedParticipant) {
+      const contextInfo = extendedText.contextInfo || {};
+      quotedParticipant = contextInfo.participant || null;
+      stanzaId = contextInfo.stanzaId || null;
+    }
+
+    // v4.5.0: Comparar usando LID (formato: 206850607837224@lid)
+    const isReplyToBot = quotedParticipant && quotedParticipant.includes(config.botLid);
+
     return {
       from: k.remoteJid || "",
+      messageId: k.id || "",  // v4.6.0: Para deduplicacao
       text: txt,
       fromMe: k.fromMe || false,
-      pushName: d.pushName || ""
+      pushName: d.pushName || "",
+      // v4.5.0: Campos de reply corrigidos
+      isReply: !!stanzaId,
+      isReplyToBot: isReplyToBot,
+      quotedParticipant: quotedParticipant
     };
   } catch (e) { return null; }
+}
+
+// v4.4.0: Funcao para decidir se deve processar mensagem
+function shouldProcessMessage(msg) {
+  const textLower = msg.text.toLowerCase();
+
+  // Regra 1: Menciona "jarvis" ou "@jarvis" -> processar
+  if (textLower.includes("jarvis") || textLower.includes("@jarvis")) {
+    console.log("[Filter] Trigger: mencao jarvis");
+    return true;
+  }
+
+  // Regra 2: E reply a mensagem do bot -> processar
+  if (msg.isReplyToBot) {
+    console.log("[Filter] Trigger: reply ao bot");
+    return true;
+  }
+
+  return false;
 }
 
 app.post("/webhook", async (req, res) => {
@@ -505,6 +591,19 @@ app.post("/webhook", async (req, res) => {
   const msg = parseWebhook(p);
   if (!msg || !msg.text) return res.json({ status: "ignored" });
   if (config.groupId && msg.from !== config.groupId) return res.json({ status: "ignored" });
+
+  // v4.6.0: Deduplicacao por messageId
+  if (isMessageProcessed(msg.messageId)) {
+    console.log("[Dedup] Mensagem duplicada ignorada: " + msg.messageId);
+    return res.json({ status: "ignored", reason: "duplicate" });
+  }
+  markMessageProcessed(msg.messageId);
+
+  // v4.4.0: Nova logica de filtro com reply detection
+  if (!shouldProcessMessage(msg)) {
+    return res.json({ status: "ignored", reason: "no_trigger" });
+  }
+
   if (msg.text.startsWith(config.botPrefix)) return res.json({ status: "ignored" });
 
   const cmd = msg.text.toLowerCase().trim();
@@ -546,7 +645,9 @@ app.post("/webhook", async (req, res) => {
     return;
   }
 
-  console.log("[Webhook] " + msg.pushName + ": \"" + msg.text.slice(0, 50) + "...\"");
+  // v4.4.0: Log inclui info de reply
+  const replyInfo = msg.isReplyToBot ? " [REPLY]" : "";
+  console.log("[Webhook]" + replyInfo + " " + msg.pushName + ": \"" + msg.text.slice(0, 50) + "...\"");
   res.json({ status: "processing" });
 
   // BUG FIX #7: Catch duplo para garantir log de erros
@@ -581,11 +682,12 @@ app.get("/health", async (req, res) => {
     status: "ok",
     service: config.serviceName,
     version: config.version,
-    architecture: "Claude --resume + Redis + Bug Fixes",
+    architecture: "Claude --resume + Redis + Reply Detection (LID)",
     redis: rok ? "connected" : "disconnected",
     activeLocks: sessionLocks.size,
     uptime: Math.floor(process.uptime()),
     sessionTtl: config.sessionTtl,
+    botLid: config.botLid,
     memory: {
       heapUsedMB: Math.floor(process.memoryUsage().heapUsed / 1024 / 1024),
       rssMB: Math.floor(process.memoryUsage().rss / 1024 / 1024)
@@ -619,18 +721,17 @@ app.get("/", (req, res) => {
   res.json({
     name: config.serviceName,
     version: config.version,
-    description: "CNPJ Assistant v4.3 - com bug fixes para timeout e sessoes",
+    description: "CNPJ Assistant v4.5 - Reply Detection (LID) + Bug Fixes",
     commands: [
       "/reset - limpa contexto",
       "/sessao - info da sessao",
       "/locks - mostra locks ativos"
     ],
-    fixes: [
-      "SIGKILL para processos zombie",
-      "Lock por grupo para race condition",
-      "Validacao UUID de sessao",
-      "Limpeza especifica de erros de sessao",
-      "Catch duplo para erros async"
+    features: [
+      "Reply detection - responde quando usuario responde mensagem do bot",
+      "Mencao jarvis - responde quando menciona jarvis",
+      "Session Redis com TTL",
+      "Rate limiting 5 req/min"
     ]
   });
 });
@@ -667,20 +768,18 @@ process.on("SIGINT", async () => {
   app.listen(config.port, () => {
     console.log("============================================");
     console.log("  CNPJ-ASSISTANT v" + config.version);
-    console.log("  Claude --resume + Redis + Bug Fixes");
+    console.log("  Dedup + Reply Detection + Redis");
     console.log("============================================");
     console.log("  Porta: " + config.port);
     console.log("  Grupo: " + (config.groupId || "(todos)"));
     console.log("  Redis: " + config.redisUrl);
+    console.log("  Bot LID: " + config.botLid);
     console.log("  TTL Sessao: " + config.sessionTtl + "s");
     console.log("  Timeout Claude: " + config.claudeTimeout + "ms");
     console.log("============================================");
-    console.log("  FIXES APLICADOS:");
-    console.log("  - Bug #1: SIGKILL para zombie processes");
-    console.log("  - Bug #2: Lock por grupo (race condition)");
-    console.log("  - Bug #4: Limpeza especifica de sessao");
-    console.log("  - Bug #6: Validacao UUID sessao");
-    console.log("  - Bug #7: Catch duplo async");
+    console.log("  TRIGGERS:");
+    console.log("  - Mencao: jarvis, @jarvis");
+    console.log("  - Reply: resposta a mensagem do bot");
     console.log("============================================");
   });
 })();
