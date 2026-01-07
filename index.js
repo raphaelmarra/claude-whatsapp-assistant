@@ -462,29 +462,31 @@ async function sendWhatsAppSingle(to, text) {
 }
 
 async function findAndSendCSVFiles(to) {
-  const appDir = "/app";
-  let csvFiles = [];
-
-  try {
-    const files = fs.readdirSync(appDir);
-    csvFiles = files.filter(f => f.endsWith(".csv"));
-  } catch (e) {
-    return [];
-  }
-
+  const dirs = ["/app", "/tmp"];
   const sent = [];
-  for (const csvFile of csvFiles) {
-    const filePath = path.join(appDir, csvFile);
+
+  for (const dir of dirs) {
+    let csvFiles = [];
     try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      console.log("[CSV] Encontrado arquivo: " + csvFile + " (" + content.length + " bytes)");
-      await sendWhatsAppDocument(to, content, csvFile, "Dados exportados");
-      fs.unlinkSync(filePath);
-      console.log("[CSV] Arquivo enviado e removido: " + csvFile);
-      sent.push(csvFile);
-      await new Promise(r => setTimeout(r, 500));
+      const files = fs.readdirSync(dir);
+      csvFiles = files.filter(f => f.endsWith(".csv"));
     } catch (e) {
-      console.error("[CSV] Erro ao processar " + csvFile + ": " + e.message);
+      continue;
+    }
+
+    for (const csvFile of csvFiles) {
+      const filePath = path.join(dir, csvFile);
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        console.log("[CSV] Encontrado arquivo: " + filePath + " (" + content.length + " bytes)");
+        await sendWhatsAppDocument(to, content, csvFile, "Dados exportados");
+        fs.unlinkSync(filePath);
+        console.log("[CSV] Arquivo enviado e removido: " + csvFile);
+        sent.push(csvFile);
+        await new Promise(r => setTimeout(r, 500));
+      } catch (e) {
+        console.error("[CSV] Erro ao processar " + csvFile + ": " + e.message);
+      }
     }
   }
   return sent;
